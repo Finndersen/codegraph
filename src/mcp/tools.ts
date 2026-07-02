@@ -2503,10 +2503,6 @@ export class ToolHandler {
       minScore: 0.2,
     });
 
-    if (subgraph.nodes.size === 0) {
-      return this.textResult(`No relevant code found for "${query}"`);
-    }
-
     // Graph-aware glue: findRelevantContext builds the subgraph from name/text
     // search, so a method that BRIDGES named symbols — e.g. App.tsx's
     // triggerRender, which calls the named triggerUpdate — is never a search hit
@@ -2630,6 +2626,14 @@ export class ToolHandler {
         }
         for (const n of tierPicks) tierSeedIds.add(n.id);
       }
+    }
+
+    // Named-symbol seeding (getNodesByName) may have populated subgraph.nodes
+    // even when FTS returned nothing — e.g. underscore-prefixed snake_case names
+    // whose FTS tokens are too common to score above minScore. Defer the empty
+    // check until after seeding so those symbols are not silently dropped.
+    if (subgraph.nodes.size === 0) {
+      return this.textResult(`No relevant code found for "${query}"`);
     }
 
     // Step 2: Group nodes by file, score by relevance
