@@ -1086,23 +1086,25 @@ export class QueryBuilder {
       SELECT nodes.*,
         CASE
           WHEN name = ? THEN 1.0
-          WHEN name LIKE ? THEN 0.9
-          WHEN name LIKE ? THEN 0.8
-          WHEN qualified_name LIKE ? THEN 0.7
+          WHEN name LIKE ? ESCAPE '\' THEN 0.9
+          WHEN name LIKE ? ESCAPE '\' THEN 0.8
+          WHEN qualified_name LIKE ? ESCAPE '\' THEN 0.7
           ELSE 0.5
         END as score
       FROM nodes
       WHERE (
-        name LIKE ? OR
-        qualified_name LIKE ? OR
-        name LIKE ?
+        name LIKE ? ESCAPE '\' OR
+        qualified_name LIKE ? ESCAPE '\' OR
+        name LIKE ? ESCAPE '\'
       )
     `;
 
-    // Pattern variants for better matching
+    // Escape LIKE special chars so _ and % in symbol names match literally.
+    // SQLite LIKE: _ = any single char, % = any sequence — both must be escaped.
+    const escaped = query.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
     const exactMatch = query;
-    const startsWith = `${query}%`;
-    const contains = `%${query}%`;
+    const startsWith = `${escaped}%`;
+    const contains = `%${escaped}%`;
 
     const params: (string | number)[] = [
       exactMatch,     // Exact match score
