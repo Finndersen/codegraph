@@ -798,26 +798,50 @@ export class QueryBuilder {
     const kinds = mergedKinds;
     const languages = mergedLanguages;
 
-    // First try FTS5 with prefix matching
-    let results = text
-      ? this.searchNodesFTS(text, { kinds, languages, limit, offset })
-      // Over-fetch by 5× when running filter-only (no text). The
-      // post-scoring path: + name: filters can be very selective, so
-      // a smaller multiplier risks returning fewer than `limit`
-      // results despite the DB having plenty of matches.
-      : this.searchAllByFilters({ kinds, languages, limit: limit * 5 });
-
-    // If no FTS results, try LIKE-based substring search
-    if (results.length === 0 && text.length >= 2) {
-      results = this.searchNodesLike(text, { kinds, languages, limit, offset });
+    // Exact name lookup — O(log n) via idx_nodes_lower_name, bypasses FTS tokenizer.
+    // The FTS unicode61 tokenizer treats underscores as separators, so names like
+    // `_private_method` or `get_module_level_fn` tokenize to bare words and can
+    // rank poorly or miss entirely. When the caller supplies a single symbol name
+    // (no spaces), check for a precise match before falling back to FTS/LIKE/fuzzy.
+    let results: SearchResult[] = [];
+    if (text && !text.includes(' ') && text.length >= 2) {
+      let exactSql = 'SELECT * FROM nodes WHERE lower(name) = lower(?)';
+      const exactParams: (string | number)[] = [text];
+      if (kinds && kinds.length > 0) {
+        exactSql += ` AND kind IN (${kinds.map(() => '?').join(',')})`;
+        exactParams.push(...kinds);
+      }
+      if (languages && languages.length > 0) {
+        exactSql += ` AND language IN (${languages.map(() => '?').join(',')})`;
+        exactParams.push(...languages);
+      }
+      const exactRows = this.db.prepare(exactSql).all(...exactParams) as NodeRow[];
+      results = exactRows.map(row => ({ node: rowToNode(row), score: 1.0 }));
     }
 
-    // Final fuzzy fallback: scan all known names and keep those within
-    // a tight Levenshtein distance. Only fires when both FTS and LIKE
-    // returned nothing AND there's a text portion long enough to be
-    // worth fuzzing (1-char queries would match too much).
-    if (results.length === 0 && text.length >= 3) {
-      results = this.searchNodesFuzzy(text, { kinds, languages, limit });
+    // FTS / LIKE / fuzzy — only when exact lookup found nothing.
+    if (results.length === 0) {
+      // First try FTS5 with prefix matching
+      results = text
+        ? this.searchNodesFTS(text, { kinds, languages, limit, offset })
+        // Over-fetch by 5× when running filter-only (no text). The
+        // post-scoring path: + name: filters can be very selective, so
+        // a smaller multiplier risks returning fewer than `limit`
+        // results despite the DB having plenty of matches.
+        : this.searchAllByFilters({ kinds, languages, limit: limit * 5 });
+
+      // If no FTS results, try LIKE-based substring search
+      if (results.length === 0 && text.length >= 2) {
+        results = this.searchNodesLike(text, { kinds, languages, limit, offset });
+      }
+
+      // Final fuzzy fallback: scan all known names and keep those within
+      // a tight Levenshtein distance. Only fires when both FTS and LIKE
+      // returned nothing AND there's a text portion long enough to be
+      // worth fuzzing (1-char queries would match too much).
+      if (results.length === 0 && text.length >= 3) {
+        results = this.searchNodesFuzzy(text, { kinds, languages, limit });
+      }
     }
 
     // Supplement: ensure exact name matches are always candidates.

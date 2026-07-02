@@ -2475,13 +2475,30 @@ export class ToolHandler {
     }
     const maxFiles = clamp((args.maxFiles as number) || budget.defaultMaxFiles, 1, 20);
 
-    // Step 1: Find relevant context with generous parameters.
-    // Use a large maxNodes budget — explore has its own 35k char output limit
-    // that prevents context bloat, so more nodes just means better coverage
-    // across entry points (especially for large files like Svelte components).
+    // Step 1: Find relevant context with adaptive BFS depth.
+    //
+    // A depth-0 pre-flight identifies how many distinct files contain entry-point
+    // nodes (direct FTS hits). Focused queries (1–2 files) get depth 2 so BFS
+    // pulls in meaningful neighbours; broad queries (many files already) stay at
+    // depth 1 to avoid the combinatorial explosion that comes from fanning out 3
+    // hops across a well-connected codebase. searchLimit is capped at 5 to bound
+    // the number of BFS roots and their per-root fan-out.
+    const entrySubgraph = await cg.findRelevantContext(query, {
+      searchLimit: 5,
+      traversalDepth: 0,
+      maxNodes: 200,
+      minScore: 0.2,
+    });
+    const entryFileCount = new Set(
+      [...entrySubgraph.nodes.values()]
+        .filter(n => n.kind !== 'import' && n.kind !== 'export')
+        .map(n => n.filePath)
+    ).size;
+    const traversalDepth = entryFileCount <= 2 ? 2 : 1;
+
     const subgraph = await cg.findRelevantContext(query, {
-      searchLimit: 8,
-      traversalDepth: 3,
+      searchLimit: 5,
+      traversalDepth,
       maxNodes: 200,
       minScore: 0.2,
     });
