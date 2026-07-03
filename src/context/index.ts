@@ -53,16 +53,22 @@ function extractSymbolsFromQuery(query: string): string[] {
     }
   }
 
-  // Extract snake_case identifiers
-  const snakeCasePattern = /\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b/gi;
+  // Extract snake_case identifiers. Leading underscore(s) are captured INSIDE
+  // the group (not stripped) — \b can't match between two word characters, so
+  // "_get_original_x" would otherwise never match at all: JS regex \w treats
+  // "_" as a word char, so there's no boundary between "_" and "g". Python's
+  // private-method convention (_foo, __foo) relies on this leading underscore
+  // surviving so the extracted symbol matches the DB's actual stored name.
+  const snakeCasePattern = /\b(_*[a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b/gi;
   while ((match = snakeCasePattern.exec(query)) !== null) {
     if (match[1] && match[1].length >= 3) {
       symbols.add(match[1]);
     }
   }
 
-  // Extract SCREAMING_SNAKE_CASE
-  const screamingPattern = /\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)\b/g;
+  // Extract SCREAMING_SNAKE_CASE (same leading-underscore fix as above, for
+  // private module-level constants like _MAX_RETRIES).
+  const screamingPattern = /\b(_*[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)\b/g;
   while ((match = screamingPattern.exec(query)) !== null) {
     if (match[1]) {
       symbols.add(match[1]);
@@ -94,7 +100,8 @@ function extractSymbolsFromQuery(query: string): string[] {
 
   // Extract plain lowercase identifiers (3+ chars, not already matched)
   // Catches symbol names like "undo", "redo", "history", "render", "parse"
-  const lowercasePattern = /\b([a-z][a-z0-9]{2,})\b/g;
+  // (and their leading-underscore private variants, e.g. "_parse").
+  const lowercasePattern = /\b(_*[a-z][a-z0-9]{2,})\b/g;
   while ((match = lowercasePattern.exec(query)) !== null) {
     if (match[1]) {
       symbols.add(match[1]);
@@ -122,6 +129,10 @@ function extractSymbolsFromQuery(query: string): string[] {
     'response', 'responses', 'implement', 'implements', 'implementation',
     'interface', 'interfaces', 'class', 'classes', 'method', 'methods',
     'trigger', 'triggers', 'affected', 'affect', 'affects',
+    // Verbs that read as ordinary English in a task description ("patch the
+    // offer") but also exact-match unrelated HTTP-method handlers/domain
+    // nouns across a large codebase (e.g. a REST view's `patch` method).
+    'patch', 'patched', 'patches', 'offer', 'offers', 'offered',
     'else', 'code', 'failing', 'failed', 'silently', 'decide', 'decides',
     'return', 'returns', 'returned', 'take', 'takes', 'taken',
     'check', 'checks', 'checked', 'create', 'creates', 'created',
@@ -536,6 +547,44 @@ export class ContextBuilder {
       exactMatches = exactMatches.slice(0, Math.ceil(opts.searchLimit * 3));
     }
 
+    // Step 2c: Detect path-shaped query tokens (contain '/' or end in a known
+    // source extension) and resolve them directly against the file index. A
+    // path is as unambiguous an anchor as a named identifier — like the exact
+    // symbol matches above, it should short-circuit past fuzzy word matching
+    // rather than being tokenized into loose words ("trips/flights/schemas.py"
+    // -> "trips", "flights", "schemas", "py") and fuzzy-matched against
+    // unrelated symbols that happen to share one of those words. This is
+    // ADDITIVE — it injects the file's nodes as extra high-confidence entries
+    // alongside whatever fuzzy search already finds; it never narrows or
+    // excludes results down to just that file.
+    const pathMatchIds = new Set<string>();
+    const PATH_EXT = /\.(?:py|ts|tsx|js|jsx|mjs|cjs|go|rb|php|java|kt|kts|rs|c|h|hpp|cc|cxx|cpp|cs|swift|scala|lua|dart|vue|svelte|astro|m|mm|ex|exs)$/i;
+    const pathTokens = query
+      .split(/\s+/)
+      .map((t) => t.replace(/^[.,;:()[\]{}'"]+|[.,;:()[\]{}'"]+$/g, ''))
+      .filter((t) => t.length > 0 && (t.includes('/') || PATH_EXT.test(t)));
+    if (pathTokens.length > 0) {
+      try {
+        const allowedKinds = new Set(
+          opts.nodeKinds && opts.nodeKinds.length > 0 ? opts.nodeKinds : HIGH_VALUE_NODE_KINDS
+        );
+        for (const token of pathTokens) {
+          const filePaths = this.queries.findFilesByPathSuffix(token, 3);
+          for (const filePath of filePaths) {
+            const fileNodes = this.queries.getNodesByFile(filePath);
+            for (const n of fileNodes) {
+              if (!allowedKinds.has(n.kind)) continue;
+              if (exactMatches.some((e) => e.node.id === n.id)) continue;
+              exactMatches.push({ node: n, score: 60 });
+              pathMatchIds.add(n.id);
+            }
+          }
+        }
+      } catch (error) {
+        logDebug('Path-shaped token resolution failed', { pathTokens, error: String(error) });
+      }
+    }
+
     // Step 3: Run text search for natural language term matching
     // This catches file-name and node-name matches that semantic search may miss,
     // which is critical for template-heavy codebases (e.g., Liquid/Shopify themes)
@@ -725,9 +774,10 @@ export class ContextBuilder {
         if (matchCount >= 2) {
           // Multiplicative boost — 2 terms → 2x, 3 terms → 2.5x
           result.score *= 1 + matchCount * 0.5;
-        } else if (distinctiveExactMatchIds.has(result.node.id)) {
-          // Exact match on a distinctive identifier the user explicitly named —
-          // keep full score (e.g. "LiveEditMode DevServerPreview").
+        } else if (pathMatchIds.has(result.node.id) || distinctiveExactMatchIds.has(result.node.id)) {
+          // Exact match on a distinctive identifier, or a node from a
+          // path-shaped token the user explicitly named — keep full score
+          // (e.g. "LiveEditMode DevServerPreview", or "trips/flights/schemas.py").
         } else if (exactMatchIds.has(result.node.id)) {
           // Exact match on a COMMON word (e.g. "flat" → FLAT): high-scoring noise
           // inflated by the +exact-name bonus, corroborated by no other query
@@ -897,8 +947,18 @@ export class ContextBuilder {
     // Cap entry points so traversal budget isn't spread too thin.
     // With 36 entry points and maxNodes=120, each gets only 3 nodes — useless.
     // Cap to searchLimit so each entry point gets a meaningful traversal budget.
+    // Path-shaped matches are exempt from this cap (up to a safety ceiling): the
+    // user named an exact file, so its definitions should all become entry
+    // points rather than being arbitrarily cut down to fit the same budget as
+    // fuzzy word matches.
     if (filteredResults.length > opts.searchLimit) {
-      filteredResults = filteredResults.slice(0, opts.searchLimit);
+      const pathResults = filteredResults.filter((r) => pathMatchIds.has(r.node.id));
+      const otherResults = filteredResults.filter((r) => !pathMatchIds.has(r.node.id));
+      const PATH_ENTRY_CEILING = 40;
+      filteredResults = [
+        ...pathResults.slice(0, PATH_ENTRY_CEILING),
+        ...otherResults.slice(0, opts.searchLimit),
+      ];
     }
 
     // Confidence signal for the honest-handoff footer (consumed in buildContext).
@@ -917,6 +977,7 @@ export class ContextBuilder {
       );
       const anyStrong = filteredResults.some(r => {
         if (distinctive.has(r.node.name.toLowerCase())) return true;
+        if (pathMatchIds.has(r.node.id)) return true;
         const nameLower = r.node.name.toLowerCase();
         const dirSegs = path.dirname(r.node.filePath).toLowerCase().split('/');
         let hits = 0;
