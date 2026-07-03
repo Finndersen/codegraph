@@ -75,6 +75,11 @@ export const STOP_WORDS = new Set([
   // Code-specific noise (avoid filtering common symbol names like get/set/add/build/find/list)
   'code', 'file', 'files', 'function', 'method', 'class', 'type',
   'fix', 'bug', 'called',
+  // Verbs that read as ordinary English in a task description ("patch the
+  // offer") but also exact-match unrelated HTTP-method handlers/domain
+  // nouns across a large codebase (e.g. a REST view's `patch` method).
+  // Mirrors the same exclusion in context/index.ts's extractSymbolsFromQuery.
+  'patch', 'patched', 'patches', 'offer', 'offers', 'offered',
 ]);
 
 /**

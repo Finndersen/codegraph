@@ -1077,7 +1077,11 @@ export class QueryBuilder {
       params.push(...languages);
     }
 
-    sql += ' ORDER BY score LIMIT ? OFFSET ?';
+    // Secondary sort on id: bm25 ties (e.g. several identically-named `get`
+    // methods) would otherwise return in SQLite's unspecified tie order,
+    // which can vary run-to-run and produce a different noise set for the
+    // same query. id gives a stable, deterministic tiebreak.
+    sql += ' ORDER BY score, nodes.id LIMIT ? OFFSET ?';
     params.push(ftsLimit, offset);
 
     try {
@@ -1218,8 +1222,12 @@ export class QueryBuilder {
         params.push(...languages);
       }
 
-      // Fetch enough to find co-located results among common names
-      sql += ' LIMIT ?';
+      // Fetch enough to find co-located results among common names.
+      // ORDER BY id: a bare LIMIT with no ORDER BY leaves row order at
+      // SQLite's discretion, which combined with a downstream JS stable sort
+      // that ties on score, made which rows survive truncation for a common
+      // name (e.g. "get") vary run-to-run. id gives a deterministic order.
+      sql += ' ORDER BY nodes.id LIMIT ?';
       params.push(Math.max(perNameLimit * 3, 50));
 
       const rows = this.db.prepare(sql).all(...params) as (NodeRow & { score: number })[];
