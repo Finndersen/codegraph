@@ -541,6 +541,23 @@ export class QueryBuilder {
   }
 
   /**
+   * Find indexed file paths ending with the given suffix — for a query like
+   * "trips/flights/schemas.py" (a real path relative to some subdirectory of
+   * the repo root), matching against the small `files` table rather than
+   * scanning `nodes` directly. Shortest match first, so an exact file wins
+   * over a longer path that merely ends with the same suffix.
+   */
+  findFilesByPathSuffix(suffix: string, limit = 5): string[] {
+    const escaped = suffix.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+    const rows = this.db
+      .prepare(
+        `SELECT path FROM files WHERE path LIKE ? ESCAPE '\\' ORDER BY length(path) ASC LIMIT ?`
+      )
+      .all(`%${escaped}`, limit) as { path: string }[];
+    return rows.map((r) => r.path);
+  }
+
+  /**
    * Find the file that holds the densest concentration of the project's
    * internal call graph — the "core" file. Used by context-builder to
    * boost ranking of symbols in that file's directory (so e.g. sinatra
